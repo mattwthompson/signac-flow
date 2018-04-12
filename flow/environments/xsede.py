@@ -80,10 +80,10 @@ class Stampede2Environment(DefaultSlurmEnvironment):
     hostname_pattern = '.*stampede2'
     cores_per_node = 48
 
-    @classmethod
-    def calc_num_nodes(cls, np_total, ppn, force=False, **kwargs):
-        # Always just the number of nodes
-        return np_total
+#    @classmethod
+#    def calc_num_nodes(cls, np_total, ppn, force=False, **kwargs):
+#        # Always just the number of nodes
+#        return np_total
 
     @classmethod
     def script(cls, _id, tpn, ppn, partition, job_output=None, **kwargs):
@@ -111,11 +111,6 @@ class Stampede2Environment(DefaultSlurmEnvironment):
     def add_args(cls, parser):
         super(Stampede2Environment, cls).add_args(parser)
         # Hack to remove the undesirable ppn argument in this case
-        ppn_id = [i for i, action in enumerate(parser._actions)
-                  if "--ppn" in action.option_strings][0]
-        parser._handle_conflict_resolve(
-                None,
-                [('--ppn', parser._actions[ppn_id])])
         parser.add_argument(
             '-p', '--partition',
             choices=['development', 'normal', 'large', 'flat-quadrant',
