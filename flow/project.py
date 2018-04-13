@@ -36,6 +36,7 @@ from multiprocessing import TimeoutError
 import signac
 from signac.common import six
 from signac.common.six import with_metaclass
+from signac.contrib.hashing import calc_id
 
 from .environment import get_environment
 from .environment import NodesEnvironment
@@ -252,9 +253,26 @@ class JobOperation(object):
             np=self.np,
             mpi=self.mpi)
 
-    def get_id(self):
-        "Return a name, which identifies this job-operation."
-        return '{}-{}'.format(self.job, self.name)
+    def get_id(self, index=0):
+        "Return a name, which identifies this job-operation uniquely."
+        project = self.job._project
+
+        # The full name is truely unique for one job-operation
+        full_name = '{}-{}-{}-{}'.format(
+            project.root_directory(), self.job.get_id(), self.name, index)
+
+        # The job_op_id is a hash number based on the full_name (expected to be unique)
+        job_op_id = calc_id(full_name)
+
+        # The readable name is constructed based on the project id, job id,
+        # operation name, and index, however all values are restricted in length
+        # to ensure that we can see at least parts of them. The readable name is
+        # restricted, such that the returned id has not more than 100 characters.
+        readable_name = '{}-{}-{}-{:04d}-'.format(
+            str(project)[:12], str(self.job)[:8], self.name[:12], index)[:68]
+
+        # By appending the unique job_op_id, we ensure that each name is truly unique.
+        return readable_name + job_op_id
 
     def __hash__(self):
         return int(sha1(self.get_id().encode('utf-8')).hexdigest(), 16)
