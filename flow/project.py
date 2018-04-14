@@ -271,7 +271,10 @@ class JobOperation(object):
         # and the index number. All names and the id itself are restricted in length
         # to guarantuee that the id does not get too long.
         max_len = self.MAX_LEN_ID - len(job_op_id)
-        readable_name = '{}#{}#{}#{:04d}#'.format(
+        if max_len < len(job_op_id):
+            raise ValueError("Value for MAX_LEN_ID is too small ({}).".format(self.MAX_LEN_ID))
+
+        readable_name = '{}/{}/{}/{:04d}/'.format(
             str(project)[:12], str(self.job)[:8], self.name[:12], index)[:max_len]
 
         # By appending the unique job_op_id, we ensure that each id is truly unique.
