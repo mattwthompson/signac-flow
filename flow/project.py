@@ -227,6 +227,7 @@ class JobOperation(object):
     :type job: :py:class:`signac.Job`.
     :type cmd: str
     """
+    MAX_LEN_ID = 100
 
     def __init__(self, name, job, cmd, np=None, mpi=False):
         if np is None:
@@ -257,21 +258,23 @@ class JobOperation(object):
         "Return a name, which identifies this job-operation uniquely."
         project = self.job._project
 
-        # The full name is truely unique for one job-operation
-        full_name = '{}-{}-{}-{}'.format(
+        # The full name is designed to be truely unique for each job-operation.
+        full_name = '{}%{}%{}%{}'.format(
             project.root_directory(), self.job.get_id(), self.name, index)
 
-        # The job_op_id is a hash number based on the full_name (expected to be unique)
+        # The job_op_id is a hash number based on the unique full name.
         job_op_id = calc_id(full_name)
 
-        # The readable name is constructed based on the project id, job id,
-        # operation name, and index, however all values are restricted in length
-        # to ensure that we can see at least parts of them. The readable name is
-        # restricted, such that the returned id has not more than 100 characters.
-        readable_name = '{}-{}-{}-{:04d}-'.format(
-            str(project)[:12], str(self.job)[:8], self.name[:12], index)[:68]
+        # The actual job id is then constructed from a readable part and the job_op_id,
+        # ensuring that the job-op is still somewhat identifiable, but guarantueed to
+        # be unique. The readable name is based on the project id, job id, operation name,
+        # and the index number. All names and the id itself are restricted in length
+        # to guarantuee that the id does not get too long.
+        max_len = self.MAX_LEN_ID - len(job_op_id)
+        readable_name = '{}#{}#{}#{:04d}#'.format(
+            str(project)[:12], str(self.job)[:8], self.name[:12], index)[:max_len]
 
-        # By appending the unique job_op_id, we ensure that each name is truly unique.
+        # By appending the unique job_op_id, we ensure that each id is truly unique.
         return readable_name + job_op_id
 
     def __hash__(self):
