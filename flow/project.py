@@ -258,11 +258,11 @@ class JobOperation(object):
         "Return a name, which identifies this job-operation uniquely."
         project = self.job._project
 
-        # The full name is designed to be truely unique for each job-operation.
+        # The full name is designed to be truly unique for each job-operation.
         full_name = '{}%{}%{}%{}'.format(
             project.root_directory(), self.job.get_id(), self.name, index)
 
-        # The job_op_id is a hash number based on the unique full name.
+        # The job_op_id is a hash computed from the unique full name.
         job_op_id = calc_id(full_name)
 
         # The actual job id is then constructed from a readable part and the job_op_id,
