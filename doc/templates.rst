@@ -4,14 +4,17 @@
 Templates
 =========
 
-The **signac-flow** package uses jinja2 template scripts to generate scripts for execution and submission to cluster scheduling systems.
+The **signac-flow** package uses `jinja2`_ template scripts to generate scripts for execution and submission to cluster scheduling systems.
 Templates for simple bash execution and submission to popular schedulers and compute clusters are shipped with the package.
+
+.. _jinja2: jinja.pocoo.org
+
 
 Replace the default template
 ============================
 
 To customize the script generation a user can replace the default template or customize any of the provided ones.
-This is an example for a basic template, which would be sufficient for the simple serial execution of multiple operations:
+This is an example for a basic template that would be sufficient for the simple serial execution of multiple operations:
 
 .. code-block:: jinja
 
@@ -27,6 +30,7 @@ The default ``script.sh`` template only extends from the selected base template 
 
 .. literalinclude:: ../flow/templates/script.sh
    :language: jinja
+
 
 Customize provided templates
 ============================
@@ -48,11 +52,12 @@ The first line indicates that this template extends an existing template called 
 The second and last line indicate that the enclosed lines are to be placed in the *body* block of the base template.
 The third line is the actual command that we want to add and the third line ensures that the code provided by the base template within the body block is still added.
 
+
 The base template
 =================
 
 The **signac-flow** package will select a different base script template depending on whether you are simply generating a script using the ``script`` command or whether you are submitting to a scheduling system with ``submit``.
-In the latter case, the base script template is further selected based on the available scheduling system or whether you are on any of the :ref:`officially supported environments <supported-environments>`.
+In the latter case, the base script template is selected based on the available scheduling system or whether you are on any of the :ref:`officially supported environments <supported-environments>`.
 This is a short illustration of that heuristic:
 
 .. code-block:: bash
@@ -89,10 +94,11 @@ Regardless of which *base script template* you are actually extending from, all 
    footer
     Any commands that should be executed at the very end of the script.
 
+
 Execution Directives
 ====================
 
-Any :py:class:`~flow.FlowProject` *operation* can be ammended with so called *execution directives*.
+Any :py:class:`~flow.FlowProject` *operation* can be amended with so called *execution directives*.
 For example, to specify that we want to parallelize a particular operation on **4** processing units, we would provide the ``np=4`` directive:
 
 .. code-block:: python
@@ -106,7 +112,10 @@ For example, to specify that we want to parallelize a particular operation on **
         with Pool(4) as pool:
           print("hello", job)
 
-All directives are essentially conventions, the ``np`` directive in particular means that this particular operation requires 4 processors for execution.
+In general, there are no restrictions on what directives can be specified; they provide a simple way to pass additional information from an operation definition in the :py:class:`~flow.FlowProject` to the submission script.
+However, **signac-flow** uses certain conventions for specific directives to provide a common language across all templates for certain common features.
+For example, the ``np`` directive indicates that a particular operation requires 4 processors for execution.
+
 The following directives are respected by all base templates shipped with **signac-flow**:
 
 .. glossary::
@@ -117,7 +126,7 @@ The following directives are respected by all base templates shipped with **sign
     mpi
       The number of MPI ranks required for this operation.
       The value for *np* will default to this value unless specified separately.
-      All templates will add the aproriate ``mpiexec`` command to the ``prefix_cmd`` variable when this directive is specified.
+      All templates will add the approriate ``mpiexec`` command to the ``prefix_cmd`` variable when this directive is specified.
 
     gpu
       Whether this operation requires a GPU for execution.
@@ -142,7 +151,7 @@ The combination of *np* and *mpi* allows us to realize essentially 4 execution m
 |                | MPI rank                     |                    |                   |
 +----------------+------------------------------+--------------------+-------------------+
 
-This is the body block from the ``base_script.sh`` base template:
+For reference, this is the body block from the ``base_script.sh`` base template:
 
 .. literalinclude:: ../flow/templates/base_script.sh
     :language: jinja
