@@ -86,6 +86,7 @@ from .labels import classlabel
 from .labels import _is_label_func
 from . import legacy
 from .util import config as flow_config
+from .hooks import Hooks
 
 
 logger = logging.getLogger(__name__)
@@ -203,6 +204,28 @@ class _post(_condition):
             post_conditions = getattr(other_func, '_flow_post', list())
             return all(c(job) for c in post_conditions)
         return cls(metacondition)
+
+
+class _HooksDecorator(object):
+
+    def __init__(self):
+        self._operation_hooks = defaultdict(lambda: defaultdict(list))
+
+    def __getitem__(self, func):
+        return self._operation_hooks[func]
+
+    def __getattr__(self, name):
+
+        class install_hook(object):
+
+            def __init__(install_self, hook_func):
+                install_self.hook_func = hook_func
+
+            def __call__(install_self, func):
+                self._operation_hooks[func][name].append(install_self.hook_func)
+                return func
+
+        return install_hook
 
 
 def make_bundles(operations, size=None):
@@ -504,6 +527,8 @@ class _FlowProjectClass(type):
         # key and the label name as value, or None to use the default label name.
         cls._LABEL_FUNCTIONS = OrderedDict()
 
+        cls.hook = _HooksDecorator()
+
         return cls
 
 
@@ -540,6 +565,11 @@ class FlowProject(six.with_metaclass(_FlowProjectClass, signac.contrib.Project))
         if JINJA2:
             self._setup_template_environment()
         self._setup_legacy_templating()  # TODO: Disable in 0.8.
+
+        # Setup execution hooks
+        self._hooks = Hooks()
+        self._operation_hooks = defaultdict(Hooks)
+        self._install_config_hooks()
 
         # Register all label functions with this project instance.
         self._label_functions = OrderedDict()
@@ -726,6 +756,27 @@ class FlowProject(six.with_metaclass(_FlowProjectClass, signac.contrib.Project))
         self.write_script_header(script, **kwargs)
         self.write_script_operations(script, operations, background=background, **kwargs)
         self.write_script_footer(script, **kwargs)
+
+    @property
+    def hooks(self):
+        "Return a reference to the instance of :class:`.hooks.Hook` of this project."
+        return self._hooks
+
+    def _install_config_hooks(self):
+        import importlib
+        try:
+            for entry in self._config['flow'].as_list('hooks'):
+                try:
+                    if '.' in entry:
+                        name, function = entry.split('.')
+                    else:
+                        name, function = entry, 'install_hooks'
+                    module = importlib.import_module(name)
+                    getattr(module, function)(self)
+                except (ImportError, AttributeError) as error:
+                    logger.error("Unable to install hook '{}': {}.".format(entry, error))
+        except KeyError:
+            pass    # no hooks configured
 
     @classmethod
     def label(cls, label_name_or_func=None):
@@ -1471,13 +1522,30 @@ class FlowProject(six.with_metaclass(_FlowProjectClass, signac.contrib.Project))
     def _fork(self, operation, timeout=None):
         logger.info("Execute operation '{}'...".format(operation))
 
-        # Execute without forking if possible...
-        if timeout is None and operation.name in self._operation_functions and \
-                operation.directives.get('executable', sys.executable) == sys.executable:
-            logger.debug("Able to optimize execution of operation '{}'.".format(operation))
-            self._operation_functions[operation.name](operation.job)
-        else:   # need to fork
-            fork(cmd=operation.cmd, timeout=timeout)
+        # Determine operation hooks
+        op_hooks = self._operation_hooks.get(operation.name, Hooks())
+
+        try:
+            self.hooks.on_start(operation)
+            op_hooks.on_start(operation)
+
+            # Execute without forking if possible...
+            if timeout is None and operation.name in self._operation_functions and \
+                    operation.directives.get('executable', sys.executable) == sys.executable:
+                logger.debug("Able to optimize execution of operation '{}'.".format(operation))
+                self._operation_functions[operation.name](operation.job)
+            else:   # need to fork
+                fork(cmd=operation.cmd, timeout=timeout)
+        except Exception as error:
+            self.hooks.on_fail(operation, error)
+            op_hooks.on_fail(operation, error)
+            raise error
+        else:
+            self.hooks.on_success(operation)
+            op_hooks.on_success(operation)
+        finally:
+            self.hooks.on_finish(operation)
+            op_hooks.on_finish(operation)
 
     @_support_legacy_api
     def run(self, jobs=None, names=None, pretend=False, np=None, timeout=None, num=None,
@@ -2099,7 +2167,7 @@ class FlowProject(six.with_metaclass(_FlowProjectClass, signac.contrib.Project))
             elif bool(label_value) is True:
                 yield label_name
 
-    def add_operation(self, name, cmd, pre=None, post=None, **kwargs):
+    def add_operation(self, name, cmd, pre=None, post=None, hooks=None, **kwargs):
         """
         Add an operation to the workflow.
 
@@ -2166,6 +2234,7 @@ class FlowProject(six.with_metaclass(_FlowProjectClass, signac.contrib.Project))
         """
         if name in self.operations:
             raise KeyError("An operation with this identifier is already added.")
+        self._operation_hooks[name].update(Hooks.from_dict(hooks))
         self.operations[name] = FlowOperation(cmd=cmd, pre=pre, post=post, directives=kwargs)
 
     def classify(self, job):
@@ -2280,6 +2349,7 @@ class FlowProject(six.with_metaclass(_FlowProjectClass, signac.contrib.Project))
 
         # Append the name and function to the class registry
         cls._OPERATION_FUNCTIONS.append((name, func))
+
         return func
 
     def _register_operations(self):
@@ -2312,6 +2382,9 @@ class FlowProject(six.with_metaclass(_FlowProjectClass, signac.contrib.Project))
                 self._operations[name] = FlowOperation(
                     cmd=_guess_cmd(func, name, **params), **params)
                 self._operation_functions[name] = func
+
+            # Update operation hooks
+            self._operation_hooks[name].update(Hooks.from_dict(self.hook[func]))
 
     @property
     def operations(self):
