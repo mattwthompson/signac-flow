@@ -1525,10 +1525,9 @@ class FlowProject(six.with_metaclass(_FlowProjectClass, signac.contrib.Project))
         # Determine operation hooks
         op_hooks = self._operation_hooks.get(operation.name, Hooks())
 
+        self.hooks.on_start(operation)
+        op_hooks.on_start(operation)
         try:
-            self.hooks.on_start(operation)
-            op_hooks.on_start(operation)
-
             # Execute without forking if possible...
             if timeout is None and operation.name in self._operation_functions and \
                     operation.directives.get('executable', sys.executable) == sys.executable:
