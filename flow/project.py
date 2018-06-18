@@ -2540,19 +2540,21 @@ class FlowProject(six.with_metaclass(_FlowProjectClass, signac.contrib.Project))
             parser = argparse.ArgumentParser()
 
         base_parser = argparse.ArgumentParser(add_help=False)
-        base_parser.add_argument(
-            '-v', '--verbose',
-            action='count',
-            default=0,
-            help="Increase output verbosity.")
-        base_parser.add_argument(
-            '--show-traceback',
-            action='store_true',
-            help="Show the full traceback on error.")
-        base_parser.add_argument(
-            '--debug',
-            action='store_true',
-            help="This option implies `-vvv --show-traceback`.")
+
+        for _parser in (parser, base_parser):
+            _parser.add_argument(
+                '-v', '--verbose',
+                action='count',
+                default=0,
+                help="Increase output verbosity.")
+            _parser.add_argument(
+                '--show-traceback',
+                action='store_true',
+                help="Show the full traceback on error.")
+            _parser.add_argument(
+                '--debug',
+                action='store_true',
+                help="This option implies `-vvv --show-traceback`.")
 
         subparsers = parser.add_subparsers()
 
