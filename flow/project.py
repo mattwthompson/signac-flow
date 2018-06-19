@@ -35,6 +35,7 @@ from hashlib import sha1
 from multiprocessing import Pool
 from multiprocessing import TimeoutError
 from multiprocessing.pool import ThreadPool
+from multiprocessing import Event
 
 import signac
 from signac.common import six
@@ -579,6 +580,7 @@ class FlowProject(six.with_metaclass(_FlowProjectClass, signac.contrib.Project))
         self._operation_functions = dict()
         self._operations = OrderedDict()
         self._register_operations()
+        self._warn_about_missing_post_conditions()
 
     def _setup_template_environment(self):
         """Setup the jinja2 template environemnt.
@@ -1111,7 +1113,7 @@ class FlowProject(six.with_metaclass(_FlowProjectClass, signac.contrib.Project))
                      detailed=False, parameters=None, skip_active=False, param_max_width=None,
                      expand=False, all_ops=False, only_incomplete=False, dump_json=False,
                      unroll=True, compact=False, pretty=False,
-                     file=sys.stdout, err=sys.stderr, ignore_errors=False,
+                     file=None, err=None, ignore_errors=False,
                      scheduler=None, pool=None, job_filter=None, no_parallelize=False):
         """Print the status of the project.
 
@@ -1158,6 +1160,10 @@ class FlowProject(six.with_metaclass(_FlowProjectClass, signac.contrib.Project))
         :param job_filter:
             (deprecated) A JSON encoded filter, that all jobs to be submitted need to match.
         """
+        if file is None:
+            file = sys.stdout
+        if err is None:
+            err = sys.stderr
         # TODO: Replace legacy code below with this code beginning version 0.7:
         # if jobs is None:
         #     jobs = list(self)     # all jobs
@@ -1201,9 +1207,8 @@ class FlowProject(six.with_metaclass(_FlowProjectClass, signac.contrib.Project))
                 # First attempt at parallelized status determination.
                 # This may fail on systems that don't allow threads.
                 tmp = list(tqdm(
-                    _map(_get_job_status, jobs),
-                    desc="Collect job status info",
-                    total=len(jobs)))
+                    iterable=_map(_get_job_status, jobs),
+                    desc="Collect job status info", total=len(jobs), file=err))
         except RuntimeError as error:
             if "can't start new thread" not in error.args:
                 raise   # unrelated error
@@ -1214,8 +1219,8 @@ class FlowProject(six.with_metaclass(_FlowProjectClass, signac.contrib.Project))
                 "Entering serial mode with fallback progress indicator. The "
                 "status update may take longer than ususal.".format(error))
             tmp = list(with_progressbar(
-                map(_get_job_status, jobs),
-                total=len(jobs), desc='Collect job status info:'))
+                iterable=map(_get_job_status, jobs),
+                total=len(jobs), desc='Collect job status info:', file=err))
 
         operations_errors = {s['_operations_error'] for s in tmp}
         labels_errors = {s['_labels_error'] for s in tmp}
@@ -1612,19 +1617,24 @@ class FlowProject(six.with_metaclass(_FlowProjectClass, signac.contrib.Project))
         if num and num < 0:
             num = None
 
+        messages = list()
+
+        def log(msg, lvl=logging.INFO):
+            messages.append((msg, lvl))
+
+        reached_execution_limit = Event()
+
         def select(operation):
             if operation.job not in self:
-                logger.info("Job '{}' is no longer part of the project.".format(operation.job))
+                log("Job '{}' is no longer part of the project.".format(operation.job))
                 return False
             if num is not None and select.total_execution_count >= num:
-                logger.warning(
-                    "Reached the maximum number of operations that can be executed, but "
-                    "there are still operations pending.")
-                return False    # Reached total number of executions
+                reached_execution_limit.set()
+                raise StopIteration  # Reached total number of executions
 
             if num_passes is not None and select.num_executions.get(operation, 0) >= num_passes:
-                print("Operation '{}' exceeds max. # of "
-                      "allowed passes ({}).".format(operation, num_passes), file=sys.stderr)
+                log("Operation '{}' exceeds max. # of "
+                    "allowed passes ({}).".format(operation, num_passes))
                 return False    # Reached maximum number of passes for this operation.
 
             # Increase execution counters for this operation.
@@ -1642,7 +1652,17 @@ class FlowProject(six.with_metaclass(_FlowProjectClass, signac.contrib.Project))
         select.total_execution_count = 0
 
         for i_pass in count(1):
-            operations = list(filter(select, self._get_pending_operations(jobs, names)))
+            if reached_execution_limit.is_set():
+                logger.warning("Reached the maximum number of operations that can be executed, but "
+                               "there are still operations pending.")
+                break
+            try:
+                operations = list(filter(select, self._get_pending_operations(jobs, names)))
+            finally:
+                if messages:
+                    for msg, level in set(messages):
+                        logger.log(level, msg)
+                    del messages[:]     # clear
             if not operations:
                 break   # No more pending operations or execution limits reached.
             logger.info(
@@ -2382,9 +2402,13 @@ class FlowProject(six.with_metaclass(_FlowProjectClass, signac.contrib.Project))
                 self._operations[name] = FlowOperation(
                     cmd=_guess_cmd(func, name, **params), **params)
                 self._operation_functions[name] = func
-
             # Update operation hooks
             self._operation_hooks[name].update(Hooks.from_dict(self.hook[func]))
+
+    def _warn_about_missing_post_conditions(self):
+        for name, operation in self._operations.items():
+            if not len(operation._postconds):
+                logger.warning("No post-conditions set for operation '{}'.".format(name))
 
     @property
     def operations(self):
@@ -2419,7 +2443,8 @@ class FlowProject(six.with_metaclass(_FlowProjectClass, signac.contrib.Project))
                         "'--stack' and will be ignored.")
         debug = args.debug
         args = {key: val for key, val in vars(args).items()
-                if key not in ['func', 'debug', 'job_id', 'filter', 'doc_filter']}
+                if key not in ['func', 'verbose', 'debug', 'show_traceback',
+                               'job_id', 'filter', 'doc_filter']}
         if args.pop('full'):
             args['detailed'] = args['all_ops'] = True
 
@@ -2427,7 +2452,7 @@ class FlowProject(six.with_metaclass(_FlowProjectClass, signac.contrib.Project))
             self.print_status(jobs=jobs, **args)
         except NoSchedulerError:
             self.print_status(jobs=jobs, **args)
-        except Exception as error:
+        except Exception:
             logger.error(
                 "Error occured during status update. Use '--ignore-errors' "
                 "to complete the update anyways or '--debug' to show the full "
@@ -2611,19 +2636,34 @@ class FlowProject(six.with_metaclass(_FlowProjectClass, signac.contrib.Project))
         if parser is None:
             parser = argparse.ArgumentParser()
 
-        parser.add_argument(
-            '-d', '--debug',
-            action='store_true',
-            help="Increase output verbosity for debugging.")
+        base_parser = argparse.ArgumentParser(add_help=False)
+
+        for _parser in (parser, base_parser):
+            _parser.add_argument(
+                '-v', '--verbose',
+                action='count',
+                default=0,
+                help="Increase output verbosity.")
+            _parser.add_argument(
+                '--show-traceback',
+                action='store_true',
+                help="Show the full traceback on error.")
+            _parser.add_argument(
+                '--debug',
+                action='store_true',
+                help="This option implies `-vvv --show-traceback`.")
 
         subparsers = parser.add_subparsers()
 
-        parser_status = subparsers.add_parser('status')
+        parser_status = subparsers.add_parser(
+            'status',
+            parents=[base_parser])
         self._add_print_status_args(parser_status)
         parser_status.set_defaults(func=self._main_status)
 
         parser_next = subparsers.add_parser(
             'next',
+            parents=[base_parser],
             description="Determine jobs that are eligible for a specific operation.")
         parser_next.add_argument(
             'name',
@@ -2631,7 +2671,10 @@ class FlowProject(six.with_metaclass(_FlowProjectClass, signac.contrib.Project))
             help="The name of the operation.")
         parser_next.set_defaults(func=self._main_next)
 
-        parser_run = subparsers.add_parser('run')
+        parser_run = subparsers.add_parser(
+            'run',
+            parents=[base_parser],
+            )
         parser_run.add_argument(          # Hidden positional arguments for backwards-compatibility.
             'hidden_operation_name',
             type=str,
@@ -2679,18 +2722,27 @@ class FlowProject(six.with_metaclass(_FlowProjectClass, signac.contrib.Project))
                  "This option is deprecated as of version 0.6, use '-p/--parallel' instead.")
         parser_run.set_defaults(func=self._main_run)
 
-        parser_script = subparsers.add_parser('script')
+        parser_script = subparsers.add_parser(
+            'script',
+            parents=[base_parser],
+        )
         self._add_script_args(parser_script)
         parser_script.set_defaults(func=self._main_script)
 
-        parser_submit = subparsers.add_parser('submit')
+        parser_submit = subparsers.add_parser(
+            'submit',
+            parents=[base_parser],
+        )
         self._add_submit_args(parser_submit)
         env_group = parser_submit.add_argument_group(
             '{} options'.format(self._environment.__name__))
         self._environment.add_args(env_group)
         parser_submit.set_defaults(func=self._main_submit)
 
-        parser_exec = subparsers.add_parser('exec')
+        parser_exec = subparsers.add_parser(
+            'exec',
+            parents=[base_parser],
+        )
         parser_exec.add_argument(
             'operation',
             type=str,
@@ -2708,13 +2760,16 @@ class FlowProject(six.with_metaclass(_FlowProjectClass, signac.contrib.Project))
         if not hasattr(args, 'func'):
             parser.print_usage()
             sys.exit(2)
-        if args.debug:
-            logging.basicConfig(level=logging.DEBUG)
-        else:
-            logging.basicConfig(level=logging.WARNING)
+
+        if args.debug:  # Implies '-vvv' and '--show-traceback'
+            args.verbose = max(3, args.verbose)
+            args.show_traceback = True
+
+        # Set verbosity level according to the `-v` argument.
+        logging.basicConfig(level=max(0, logging.ERROR - 10 * args.verbose))
 
         def _exit_or_raise():
-            if args.debug:
+            if args.show_traceback:
                 raise
             else:
                 sys.exit(1)
@@ -2736,10 +2791,11 @@ class FlowProject(six.with_metaclass(_FlowProjectClass, signac.contrib.Project))
         except Jinja2TemplateNotFound as error:
             print("Did not find template script '{}'.".format(error), file=sys.stderr)
             _exit_or_raise()
-        except AssertionError as error:
-            if not args.debug:
+        except AssertionError:
+            if not args.show_traceback:
                 print("ERROR: Encountered internal error during program execution. "
-                      "Run with '--debug' to get more information.", file=sys.stderr)
+                      "Run with '--show-traceback' or '--debug' to get more "
+                      "information.", file=sys.stderr)
             _exit_or_raise()
         except Exception as error:
             if not args.debug:
