@@ -775,7 +775,7 @@ class FlowProject(six.with_metaclass(_FlowProjectClass, signac.contrib.Project))
                     module = importlib.import_module(name)
                     getattr(module, function)(self)
                 except (ImportError, AttributeError) as error:
-                    logger.error("Unable to install hook '{}': {}.".format(entry, error))
+                    raise RuntimeError("Unable to install hook '{}': {}.".format(entry, error))
         except KeyError:
             pass    # no hooks configured
 
