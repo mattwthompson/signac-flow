@@ -26,6 +26,9 @@ import json
 import inspect
 import functools
 import contextlib
+import importlib
+import re
+import ast
 from collections import defaultdict
 from collections import OrderedDict
 from itertools import islice
@@ -769,20 +772,23 @@ class FlowProject(six.with_metaclass(_FlowProjectClass, signac.contrib.Project))
         return self._hooks
 
     def _install_config_hooks(self):
-        import importlib
         try:
-            for entry in self._config['flow'].as_list('hooks'):
-                try:
-                    if '.' in entry:
-                        name, function = entry.split('.')
-                    else:
-                        name, function = entry, 'install_hooks'
-                    module = importlib.import_module(name)
-                    getattr(module, function)(self)
-                except (ImportError, AttributeError) as error:
-                    raise RuntimeError("Unable to install hook '{}': {}.".format(entry, error))
+            hooks_config = self._config['flow'].as_list('hooks')
         except KeyError:
-            pass    # no hooks configured
+            return  # no hooks configured
+        for entry in hooks_config:
+            try:
+                m = re.match('^(?P<class_path>[\w.]+?)(\((?P<constructor>.*)\))?$', entry)
+                if m:
+                    name_module, name_class = m.groupdict()['class_path'].rsplit('.', 1)
+                    nodes = [c.rpartition('=') for c in m.groupdict('')['constructor'].split(',')]
+                    kwargs = {k: ast.literal_eval(v) for k, _, v in nodes if k}
+                    hook_class = getattr(importlib.import_module(name_module), name_class)
+                    hook_class(** kwargs).install_hooks(self)
+                else:
+                    raise ValueError("The hook configuration entry '{}' is invalid.".format(entry))
+            except (ImportError, AttributeError, ValueError, TypeError) as error:
+                raise RuntimeError("Unable to install hook '{}': {}".format(entry, error))
 
     @classmethod
     def label(cls, label_name_or_func=None):
@@ -2682,7 +2688,7 @@ class FlowProject(six.with_metaclass(_FlowProjectClass, signac.contrib.Project))
             $ python my_project.py --help
         """
         if pool is not None:
-            logger.warning(
+            logging.warning(
                 "The 'pool' argument for the FlowProject.main() function is deprecated!")
 
         if parser is None:
@@ -2818,7 +2824,16 @@ class FlowProject(six.with_metaclass(_FlowProjectClass, signac.contrib.Project))
             args.show_traceback = True
 
         # Set verbosity level according to the `-v` argument.
-        logging.basicConfig(level=max(0, logging.WARNING - 10 * args.verbose))
+        #
+        # We cannot use `logging.basicConfig`, because of issues in combination with the
+        # installation of individual filehanders for operation logging as implemented in
+        # the hooks.log_operation module.
+        logger = logging.getLogger()
+        logger.setLevel(logging.DEBUG)
+        ch = logging.StreamHandler()
+        ch.setFormatter(logging.Formatter(logging.BASIC_FORMAT))
+        ch.setLevel(level=max(0, logging.WARNING - 10 * args.verbose))
+        logger.addHandler(ch)
 
         def _exit_or_raise():
             if args.show_traceback:
