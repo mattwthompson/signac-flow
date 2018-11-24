@@ -546,6 +546,7 @@ class GraphDetectionProjectTest(BaseProjectTest):
     @GraphProject.post.isfile('fifth.txt')
     def fifth(job):
         import os
+
         def touch(fname, times=None):
             with open(fname, 'a'):
                 os.utime(fname, times)
