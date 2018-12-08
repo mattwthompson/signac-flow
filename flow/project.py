@@ -39,6 +39,7 @@ from multiprocessing import cpu_count
 from multiprocessing import TimeoutError
 from multiprocessing.pool import ThreadPool
 from multiprocessing import Event
+from contextlib import contextmanager
 
 import signac
 from signac.common import six
@@ -1520,7 +1521,7 @@ class FlowProject(six.with_metaclass(_FlowProjectClass, signac.contrib.Project))
                 if pretend:
                     print(operation.cmd)
                 else:
-                    self._fork(operation, timeout)
+                    self._run(operation, timeout)
         else:
             logger.debug("Parallelized execution of {} operation(s).".format(len(operations)))
             with contextlib.closing(Pool(processes=cpu_count() if np < 0 else np)) as pool:
@@ -1569,27 +1570,20 @@ class FlowProject(six.with_metaclass(_FlowProjectClass, signac.contrib.Project))
         except Exception as error:  # Masking all errors since they must be pickling related.
             raise self._PickleError(error)
 
-        results = [pool.apply_async(_fork_with_serialization, task) for task in s_tasks]
+        results = [pool.apply_async(_run_with_serialization, task) for task in s_tasks]
 
         for result in tqdm(results) if progress else results:
             result.get(timeout=timeout)
 
-    def _fork(self, operation, timeout=None):
-        logger.info("Execute operation '{}'...".format(operation))
-
+    @contextmanager
+    def _run_with_hooks(self, operation):
         # Determine operation hooks
         op_hooks = self._operation_hooks.get(operation.name, Hooks())
 
         self.hooks.on_start(operation)
         op_hooks.on_start(operation)
         try:
-            # Execute without forking if possible...
-            if timeout is None and operation.name in self._operation_functions and \
-                    operation.directives.get('executable', sys.executable) == sys.executable:
-                logger.debug("Able to optimize execution of operation '{}'.".format(operation))
-                self._operation_functions[operation.name](operation.job)
-            else:   # need to fork
-                fork(cmd=operation.cmd, timeout=timeout)
+            yield
         except Exception as error:
             self.hooks.on_fail(operation, error)
             op_hooks.on_fail(operation, error)
@@ -1600,6 +1594,17 @@ class FlowProject(six.with_metaclass(_FlowProjectClass, signac.contrib.Project))
         finally:
             self.hooks.on_finish(operation)
             op_hooks.on_finish(operation)
+
+    def _run(self, operation, timeout=None):
+        logger.info("Execute operation '{}'...".format(operation))
+        with self._run_with_hooks(operation):
+            if timeout is None and operation.name in self._operation_functions and \
+                    operation.directives.get('executable', sys.executable) == sys.executable:
+                logger.debug("Able to optimize execution of operation '{}'.".format(operation))
+                self._operation_functions[operation.name](operation.job)
+            else:   # need to fork
+                logger.debug("Forking to  execute operation '{}'.".format(operation))
+                fork(cmd=operation.cmd, timeout=timeout)
 
     @_support_legacy_api
     def run(self, jobs=None, names=None, pretend=False, np=None, timeout=None, num=None,
@@ -2314,7 +2319,12 @@ class FlowProject(six.with_metaclass(_FlowProjectClass, signac.contrib.Project))
             raise KeyError("An operation with this identifier is already added.")
         if hooks:
             self._operation_hooks[name].update(Hooks.from_dict(hooks))
-        self.operations[name] = FlowOperation(cmd=cmd, pre=pre, post=post, directives=kwargs)
+            if not kwargs.get('fork', False):
+                raise RuntimeError("Hooks require forking!")
+        if kwargs.get('fork', False):
+            raise NotImplementedError()
+        else:
+            self.operations[name] = FlowOperation(cmd=cmd, pre=pre, post=post, directives=kwargs)
 
     def classify(self, job):
         """Generator function which yields labels for job.
@@ -2438,10 +2448,7 @@ class FlowProject(six.with_metaclass(_FlowProjectClass, signac.contrib.Project))
             operations.extend(getattr(cls, '_OPERATION_FUNCTIONS', []))
 
         def _guess_cmd(func, name, **kwargs):
-            try:
-                executable = kwargs['directives']['executable']
-            except (KeyError, TypeError):
-                executable = sys.executable
+            executable = kwargs['directives']['executable']
             path = getattr(func, '_flow_path', inspect.getsourcefile(func))
             return '{} {} exec {} {{job._id}}'.format(executable, path, name)
 
@@ -2454,15 +2461,41 @@ class FlowProject(six.with_metaclass(_FlowProjectClass, signac.contrib.Project))
             params = {key: getattr(func, '_flow_{}'.format(key), None)
                       for key in ('pre', 'post', 'directives')}
 
+            # Add default executable to directives.
+            params['directives'] = params['directives'] or dict()
+            params['directives'].setdefault('executable', sys.executable)
+            params['directives'].setdefault('fork', False)
+
+            # Update operation hooks
+            self._operation_hooks[name].update(Hooks.from_dict(self.hook[func]))
+
             # Construct FlowOperation:
-            if getattr(func, '_flow_cmd', False):
-                self._operations[name] = FlowOperation(cmd=func, **params)
+            cmd = getattr(func, '_flow_cmd', False)
+            _fork = params['directives']['fork']
+
+            if cmd:
+                if _fork:
+                    self._operations[name] = FlowOperation(
+                        cmd=_guess_cmd(func, name, **params), **params)
+
+                    def operation_function(job):
+                        # TODO: Instead of defining a function here, we should rather check the
+                        #       directives during execution; not sure.
+                        cmd = func(job).format(job=job)
+                        job_op = JobOperation(name=name, cmd=cmd, job=job)
+                        with self._run_with_hooks(job_op):
+                            fork(cmd)
+
+                    self._operation_functions[name] = operation_function
+
+                else:
+                    if self._operation_hooks[name] or self.hooks:
+                        raise RuntimeError("Hooks require forking!")
+                    self._operations[name] = FlowOperation(cmd=func, **params)
             else:
                 self._operations[name] = FlowOperation(
                     cmd=_guess_cmd(func, name, **params), **params)
                 self._operation_functions[name] = func
-            # Update operation hooks
-            self._operation_hooks[name].update(Hooks.from_dict(self.hook[func]))
 
     @property
     def operations(self):
@@ -2632,8 +2665,7 @@ class FlowProject(six.with_metaclass(_FlowProjectClass, signac.contrib.Project))
                 operation = self._operations[args.operation]
 
                 def operation_function(job):
-                    cmd = operation(job).format(job=job)
-                    fork(cmd=cmd)
+                    fork(func(job).format(job=job))
 
         except KeyError:
             raise KeyError("Unknown operation '{}'.".format(args.operation))
@@ -2897,9 +2929,9 @@ class FlowProject(six.with_metaclass(_FlowProjectClass, signac.contrib.Project))
         return self._format_row(*args, **kwargs)
 
 
-def _fork_with_serialization(loads, project, operation):
+def _run_with_serialization(loads, project, operation):
     """Invoke the _fork() method on a serialized project instance."""
-    loads(project)._fork(loads(operation))
+    loads(project)._run(loads(operation))
 
 
 ###

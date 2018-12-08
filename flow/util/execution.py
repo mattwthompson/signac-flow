@@ -19,9 +19,9 @@ def fork(cmd, timeout=None):
         raise RuntimeError("Executing with a timeout is not supported in Python 2.7.")
 
     if six.PY2:
-        subprocess.call(cmd, shell=True)
+        subprocess.check_call(cmd, shell=True)
     else:
-        subprocess.call(cmd, shell=True, timeout=timeout)
+        subprocess.check_call(cmd, shell=True, timeout=timeout)
 
 
 __all__ = ['fork', 'TimeoutExpired']
