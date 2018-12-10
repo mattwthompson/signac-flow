@@ -158,12 +158,20 @@ class _condition(object):
         return cls(lambda job: job.document.get(key, False))
 
     @classmethod
+    def false(cls, key):
+        return cls(lambda job: not job.document.get(key, False))
+
+    @classmethod
     def always(cls, func):
         return cls(lambda _: True)(func)
 
     @classmethod
     def never(cls, func):
         return cls(lambda _: False)(func)
+
+    @classmethod
+    def not_(cls, condition):
+        return cls(lambda job: not condition(job))
 
 
 class _pre(_condition):
@@ -489,7 +497,7 @@ class FlowOperation(object):
     def eligible(self, job):
         "Eligible, when all pre-conditions are true and at least one post-condition is false."
         pre = all(cond(job) for cond in self._prereqs)
-        if len(self._postconds):
+        if pre and len(self._postconds):
             post = any(not cond(job) for cond in self._postconds)
         else:
             post = True
@@ -591,6 +599,10 @@ class FlowProject(six.with_metaclass(_FlowProjectClass, signac.contrib.Project))
         self._operation_functions = dict()
         self._operations = OrderedDict()
         self._register_operations()
+
+        # Enable buffered mode for gathering of pending operations (if available).
+        self._buffer_get_pending_operations = self.config.get(
+            'buffer_get_pending_operations', False)
 
     def _setup_template_environment(self):
         """Setup the jinja2 template environemnt.
@@ -856,20 +868,81 @@ class FlowProject(six.with_metaclass(_FlowProjectClass, signac.contrib.Project))
             self._label_functions.update(getattr(cls, '_LABEL_FUNCTIONS', dict()))
 
     pre = _pre
-    post = _post
+    """Decorator to add a pre-condition function for an operation function.
 
-    # Simple translation table for output strings.
+    Use a label function (or any function of :code:`job`) as a condition:
+
+    .. code-block:: python
+
+        @FlowProject.label
+        def some_label(job):
+            return job.doc.ready == True
+
+        @FlowProject.operation
+        @FlowProject.pre(some_label)
+        def some_operation(job):
+            pass
+
+    Use a :code:`lambda` function of :code:`job` to create custom conditions:
+
+    .. code-block:: python
+
+        @FlowProject.operation
+        @FlowProject.pre(lambda job: job.doc.ready == True)
+        def some_operation(job):
+            pass
+
+    Use the post-conditions of an operation as a pre-condition for another operation:
+
+    .. code-block:: python
+
+        @FlowProject.operation
+        @FlowProject.post(lambda job: job.isfile('output.txt'))
+        def previous_operation(job):
+            pass
+
+        @FlowProject.operation
+        @FlowProject.pre.after(previous_operation)
+        def some_operation(job):
+            pass
+    """
+
+    post = _post
+    """Decorator to add a post-condition function for an operation function.
+
+    Use a label function (or any function of :code:`job`) as a condition:
+
+    .. code-block:: python
+
+        @FlowProject.label
+        def some_label(job):
+            return job.doc.finished == True
+
+        @FlowProject.operation
+        @FlowProject.post(some_label)
+        def some_operation(job):
+            pass
+
+    Use a :code:`lambda` function of :code:`job` to create custom conditions:
+
+    .. code-block:: python
+
+        @FlowProject.operation
+        @FlowProject.post(lambda job: job.doc.finished == True)
+        def some_operation(job):
+            pass
+    """
+
     NAMES = {
         'next_operation': 'next_op',
     }
+    "Simple translation table for output strings."
 
     @classmethod
     def _tr(cls, x):
         "Use name translation table for x."
         return cls.NAMES.get(x, x)
 
-    # These are default aliases used within the status output. You can add aliases
-    # with the update_aliases() classmethod.
     ALIASES = dict(
         status='S',
         unknown='U',
@@ -879,6 +952,7 @@ class FlowProject(six.with_metaclass(_FlowProjectClass, signac.contrib.Project))
         inactive='I',
         requires_attention='!'
     )
+    "These are default aliases used within the status output."
 
     @classmethod
     def _alias(cls, x):
@@ -1022,7 +1096,7 @@ class FlowProject(six.with_metaclass(_FlowProjectClass, signac.contrib.Project))
             msg = "Error while getting operations status for job '{}': '{}'.".format(job, error)
             logger.debug(msg)
             if ignore_errors:
-                result['operations'] = None
+                result['operations'] = dict()
                 result['_operations_error'] = str(error)
             else:
                 raise
@@ -1032,7 +1106,7 @@ class FlowProject(six.with_metaclass(_FlowProjectClass, signac.contrib.Project))
         except Exception as error:
             logger.debug("Error while classifying job '{}': '{}'.".format(job, error))
             if ignore_errors:
-                result['labels'] = None
+                result['labels'] = list()
                 result['_labels_error'] = str(error)
             else:
                 raise
@@ -1110,14 +1184,16 @@ class FlowProject(six.with_metaclass(_FlowProjectClass, signac.contrib.Project))
         ('running', u'>'),
         ('completed', u'X')
     ])
+    "Symbols denoting the execution status of operations."
 
     PRETTY_OPERATION_STATUS_SYMBOLS = OrderedDict([
         ('ineligible', u'\u25cb'),   # open circle
         ('eligible', u'\u25cf'),     # black circle
-        ('active', u'\u25b9'),       # open triangel
-        ('running', u'\u25b8'),      # black triangel
+        ('active', u'\u25b9'),       # open triangle
+        ('running', u'\u25b8'),      # black triangle
         ('completed', u'\u2714'),    # check mark
     ])
+    "Pretty (unicode) symbols denoting the execution status of operations."
 
     def print_status(self, jobs=None, overview=True, overview_max_lines=None,
                      detailed=False, parameters=None, skip_active=False, param_max_width=None,
@@ -1174,9 +1250,9 @@ class FlowProject(six.with_metaclass(_FlowProjectClass, signac.contrib.Project))
             file = sys.stdout
         if err is None:
             err = sys.stderr
-        # TODO: Replace legacy code below with this code beginning version 0.7:
+        # TODO: Replace legacy code below with this code in future:
         # if jobs is None:
-        #     jobs = list(self)     # all jobs
+        #     jobs = self     # all jobs
         # Handle legacy API:
         if jobs is None:
             if job_filter is not None and isinstance(job_filter, str):
@@ -1184,7 +1260,7 @@ class FlowProject(six.with_metaclass(_FlowProjectClass, signac.contrib.Project))
                     "The 'job_filter' argument is deprecated, use the 'jobs' argument instead.",
                     DeprecationWarning)
                 job_filter = json.loads(job_filter)
-            jobs = list(self.find_jobs(job_filter))
+            jobs = legacy.JobsCursorWrapper(self, job_filter)
         elif isinstance(jobs, Scheduler):
             warnings.warn(
                 "The signature of the print_status() method has changed!", DeprecationWarning)
@@ -1417,8 +1493,8 @@ class FlowProject(six.with_metaclass(_FlowProjectClass, signac.contrib.Project))
                         print(value, file=file)
 
                 if pretty:
-                    open_frame = u'\u2514'      # open frame
-                    closing_frame = u'\u251c'   # closing frame
+                    open_frame = u'\u251c'      # open frame
+                    closing_frame = u'\u2514'   # closing frame
                     symbols = self.PRETTY_OPERATION_STATUS_SYMBOLS
                 else:
                     open_frame, closing_frame = '', ''
@@ -1554,6 +1630,14 @@ class FlowProject(six.with_metaclass(_FlowProjectClass, signac.contrib.Project))
         "Indicates a pickling error while trying to parallelize the execution of operations."
         pass
 
+    @staticmethod
+    def _dumps_op(op):
+        return (op.name, op.job._id, op.cmd, op.directives)
+
+    def _loads_op(self, blob):
+        name, job_id, cmd, directives = blob
+        return JobOperation(name, self.open_job(id=job_id), cmd, directives)
+
     def _run_operations_in_parallel(self, pool, pickle, operations, progress, timeout):
         """Execute operations in parallel.
 
@@ -1563,9 +1647,10 @@ class FlowProject(six.with_metaclass(_FlowProjectClass, signac.contrib.Project))
         project instance and the operations before submitting them to the process pool to
         enable us to try different pool and pickle module combinations.
         """
+
         try:
             s_project = pickle.dumps(self)
-            s_tasks = [(pickle.loads, s_project, pickle.dumps(op))
+            s_tasks = [(pickle.loads, s_project, self._dumps_op(op))
                        for op in with_progressbar(operations, desc='Serialize tasks')]
         except Exception as error:  # Masking all errors since they must be pickling related.
             raise self._PickleError(error)
@@ -1664,7 +1749,6 @@ class FlowProject(six.with_metaclass(_FlowProjectClass, signac.contrib.Project))
         # If no jobs argument is provided, we run operations for all jobs.
         if jobs is None:
             jobs = self
-        jobs = list(jobs)   # Ensure that the list of jobs does not change during execution.
 
         # Negative values for the execution limits, means 'no limit'.
         if num_passes and num_passes < 0:
@@ -1721,7 +1805,11 @@ class FlowProject(six.with_metaclass(_FlowProjectClass, signac.contrib.Project))
                                "there are still operations pending.")
                 break
             try:
-                operations = list(filter(select, self._get_pending_operations(jobs, names)))
+                if hasattr(signac, 'buffered') and self._buffer_get_pending_operations:
+                    with signac.buffered():
+                        operations = list(filter(select, self._get_pending_operations(jobs, names)))
+                else:
+                    operations = list(filter(select, self._get_pending_operations(jobs, names)))
             finally:
                 if messages:
                     for msg, level in set(messages):
@@ -2528,7 +2616,7 @@ class FlowProject(six.with_metaclass(_FlowProjectClass, signac.contrib.Project))
         if args.compact and not args.unroll:
             logger.warn("The -1/--one-line argument is incompatible with "
                         "'--stack' and will be ignored.")
-        debug = args.debug
+        show_traceback = args.debug or args.show_traceback
         args = {key: val for key, val in vars(args).items()
                 if key not in ['func', 'verbose', 'debug', 'show_traceback',
                                'job_id', 'filter', 'doc_filter']}
@@ -2541,10 +2629,10 @@ class FlowProject(six.with_metaclass(_FlowProjectClass, signac.contrib.Project))
             self.print_status(jobs=jobs, **args)
         except Exception:
             logger.error(
-                "Error occured during status update. Use '--ignore-errors' "
-                "to complete the update anyways or '--debug' to show the full "
-                "traceback.")
-            if debug:
+                "Error occured during status update. Use '--show-traceback' to "
+                "show the full traceback or '--ignore-errors' to complete the "
+                "update anyways.")
+            if show_traceback:
                 raise
 
     def _main_next(self, args):
@@ -2690,7 +2778,7 @@ class FlowProject(six.with_metaclass(_FlowProjectClass, signac.contrib.Project))
         else:
             filter_ = parse_filter_arg(args.filter)
             doc_filter = parse_filter_arg(args.doc_filter)
-            return list(self.find_jobs(filter=filter_, doc_filter=doc_filter))
+            return legacy.JobsCursorWrapper(self, filter_, doc_filter)
 
     def main(self, parser=None, pool=None):
         """Call this function to use the main command line interface.
@@ -2724,18 +2812,24 @@ class FlowProject(six.with_metaclass(_FlowProjectClass, signac.contrib.Project))
 
         base_parser = argparse.ArgumentParser(add_help=False)
 
-        for _parser in (parser, base_parser):
+        # The argparse module does not automatically merge options shared between the main
+        # parser and the subparsers. We therefore assign different destinations for each
+        # option and then merge them manually below.
+        for prefix, _parser in (('main_', parser), ('', base_parser)):
             _parser.add_argument(
                 '-v', '--verbose',
+                dest=prefix + 'verbose',
                 action='count',
                 default=0,
                 help="Increase output verbosity.")
             _parser.add_argument(
                 '--show-traceback',
+                dest=prefix + 'show_traceback',
                 action='store_true',
                 help="Show the full traceback on error.")
             _parser.add_argument(
                 '--debug',
+                dest=prefix + 'debug',
                 action='store_true',
                 help="This option implies `-vv --show-traceback`.")
 
@@ -2847,6 +2941,12 @@ class FlowProject(six.with_metaclass(_FlowProjectClass, signac.contrib.Project))
             parser.print_usage()
             sys.exit(2)
 
+        # Manually 'merge' the various global options defined for both the main parser
+        # and the parent parser that are shared by all subparsers:
+        for dest in ('verbose', 'show_traceback', 'debug'):
+            setattr(args, dest, getattr(args, 'main_' + dest) or getattr(args, dest))
+            delattr(args, 'main_' + dest)
+
         if args.debug:  # Implies '-vv' and '--show-traceback'
             args.verbose = max(2, args.verbose)
             args.show_traceback = True
@@ -2931,7 +3031,8 @@ class FlowProject(six.with_metaclass(_FlowProjectClass, signac.contrib.Project))
 
 def _run_with_serialization(loads, project, operation):
     """Invoke the _fork() method on a serialized project instance."""
-    loads(project)._run(loads(operation))
+    project = loads(project)
+    project._run(project._loads_op(operation))
 
 
 ###

@@ -25,8 +25,9 @@ from .operations import run
 from .environment import get_environment
 from .template import init
 from .util.misc import redirect_log
+from .operations import with_job
 
-__version__ = '0.6.2'
+__version__ = '0.6.3'
 
 __all__ = [
     'environment',
@@ -44,4 +45,5 @@ __all__ = [
     'init',
     'redirect_log',
     'get_environment',
+    'with_job'
     ]
