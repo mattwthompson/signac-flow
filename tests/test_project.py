@@ -38,8 +38,10 @@ else:
 # of the the standard library as of Python version 3.5.
 
 @contextmanager
-def redirect_stdout(new_target):
+def redirect_stdout(new_target=None):
     "Temporarily redirect all output to stdout to new_target."
+    if new_target is None:
+        new_target = StringIO()
     old_target = sys.stdout
     try:
         sys.stdout = new_target
@@ -49,8 +51,10 @@ def redirect_stdout(new_target):
 
 
 @contextmanager
-def redirect_stderr(new_target):
+def redirect_stderr(new_target=None):
     "Temporarily redirect all output to stderr to new_target."
+    if new_target is None:
+        new_target = StringIO()
     old_target = sys.stderr
     try:
         sys.stderr = new_target
@@ -251,7 +255,8 @@ class ProjectClassTest(BaseProjectTest):
         with add_cwd_to_environment_pythonpath():
             with switch_to_directory(project.root_directory()):
                 starting_dir = os.getcwd()
-                A().run()
+                with redirect_stderr():
+                    A().run()
                 self.assertTrue(os.getcwd(), starting_dir)
 
     def test_cmd_with_job_wrong_order(self):
@@ -281,7 +286,8 @@ class ProjectClassTest(BaseProjectTest):
         with add_cwd_to_environment_pythonpath():
             with switch_to_directory(project.root_directory()):
                 starting_dir = os.getcwd()
-                A().run()
+                with redirect_stderr():
+                    A().run()
                 self.assertEqual(os.getcwd(), starting_dir)
                 for job in project:
                     self.assertTrue(os.path.isfile(job.fn("world.txt")))
@@ -301,7 +307,8 @@ class ProjectClassTest(BaseProjectTest):
             with switch_to_directory(project.root_directory()):
                 starting_dir = os.getcwd()
                 with self.assertRaises(Exception):
-                    A().run()
+                    with redirect_stderr():
+                        A().run()
                 self.assertEqual(os.getcwd(), starting_dir)
 
     def test_cmd_with_job_error_handling(self):
@@ -319,7 +326,8 @@ class ProjectClassTest(BaseProjectTest):
         with add_cwd_to_environment_pythonpath():
             with switch_to_directory(project.root_directory()):
                 starting_dir = os.getcwd()
-                A().run()
+                with redirect_stderr():
+                    A().run()
                 self.assertEqual(os.getcwd(), starting_dir)
 
 
@@ -530,6 +538,23 @@ class ExecutionProjectTest(BaseProjectTest):
             self.assertIsNotNone(next_op)
             self.assertEqual(next_op.get_status(), JobStatus.queued)
 
+    @unittest.skipIf(six.PY2, 'logger output not caught for Python 2.7')
+    def test_submit_operations_bad_directive(self):
+        MockScheduler.reset()
+        project = self.mock_project()
+        operations = []
+        for job in project:
+            operations.extend(project.next_operations(job))
+        self.assertEqual(len(list(MockScheduler.jobs())), 0)
+        cluster_job_id = project._store_bundled(operations)
+        stderr = StringIO()
+        with redirect_stderr(stderr):
+            project.submit_operations(_id=cluster_job_id, operations=operations)
+        self.assertEqual(len(list(MockScheduler.jobs())), 1)
+        self.assertIn('Some of the keys provided as part of the directives were not '
+                      'used by the template script, including: bad_directive\n',
+                      stderr.getvalue())
+
     def test_condition_evaluation(self):
         project = self.mock_project()
 
@@ -586,7 +611,7 @@ class BufferedExecutionProjectTest(ExecutionProjectTest):
 
     def mock_project(self):
         project = super(BufferedExecutionProjectTest, self).mock_project()
-        project._buffer_get_pending_operations = True
+        project._use_buffered_mode = True
         return project
 
 
@@ -709,6 +734,10 @@ class LambdaGraphDetectionProjectTest(BaseProjectTest):
         R"""Check that anonymous lambda functions result in a failure."""
         with self.assertRaises(ValueError):
             self.project.detect_operation_graph()
+
+
+class BufferedExecutionDynamicProjectTest(BufferedExecutionProjectTest, ExecutionDynamicProjectTest):
+    pass
 
 
 class ProjectMainInterfaceTest(BaseProjectTest):
