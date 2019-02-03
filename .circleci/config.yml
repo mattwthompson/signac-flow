@@ -66,6 +66,41 @@ jobs:
     docker:
       - image: circleci/python:2.7
 
+  check-metadata:
+    docker:
+      - image: circleci/python:3.7
+    working_directory: ~/repo
+    steps:
+      - checkout
+      - run:
+          name: check-zenodo-metadata
+          command: |
+            python -c "import json; json.load(open('.zenodo.json'))"
+
+  test-deploy-pypi:
+    docker:
+      - image: circleci/python:3.7
+    working_directory: ~/repo
+    steps:
+      - checkout
+      - run:
+          name: test-deploy-pypi
+          command: |
+            pip install --user -U -r .requirements-deploy.txt
+            bash .test-deploy.bash
+
+  deploy-pypi:
+    docker:
+      - image: circleci/python:3.7
+    working_directory: ~/repo
+    steps:
+      - checkout
+      - run:
+          name: deploy-pypi
+          command: |
+            pip install --user -U -r .requirements-deploy.txt
+            bash .deploy.bash
+
 workflows:
   version: 2
   style-check-and-tests:
@@ -86,3 +121,25 @@ workflows:
       - test-3.7:
           requires:
             - style-check
+      - check-metadata:
+          filters:
+            branches:
+              only: /release\/.*/
+      - test-deploy-pypi:
+          filters:
+            branches:
+              only: /release\/.*/
+          requires:
+            - test-2.7
+            - test-3.4
+            - test-3.5
+            - test-3.6
+            - test-3.7
+  deploy:
+    jobs:
+      - deploy-pypi:
+          filters:
+            branches:
+              ignore: /.*/
+            tags:
+              only: /v.*/
