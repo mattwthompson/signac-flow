@@ -14,6 +14,8 @@ requirements = [
     'cloudpickle',
     # To define IntEnum in flow/scheduling/base.py.
     'enum34;python_version<"3.4"',
+    # Deprecation management
+    'deprecation>=2',
 ]
 
 description = "Simple workflow management for signac projects."
@@ -43,7 +45,7 @@ setup(
     description=description,
     long_description=long_description,
     long_description_content_type="text/markdown",
-    url="https://bitbucket.org/glotzer/signac-flow",
+    url="https://signac.io",
     keywords='workflow management signac framework database',
 
     classifiers=[
@@ -70,8 +72,4 @@ setup(
     install_requires=requirements,
 
     python_requires='>=2.7, !=3.0.*, !=3.1.*, !=3.2.*, <4',
-
-    extras_require={
-        'templating': ['jinja2>=2.8'],
-    },
 )
